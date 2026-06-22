@@ -140,6 +140,7 @@ snow sql -q "SELECT * FROM metadata.schemachange.change_history ORDER BY install
     1. [Required Snowflake Privileges](#required-snowflake-privileges)
 1. [Deployment Scenarios](#deployment-scenarios)
     1. [Out Of Order](#out-of-order)
+    1. [Strict Checksum Drift](#strict-checksum-drift)
 1. [Upgrading to 4.1.0](#upgrading-to-410)
 1. [Commands](#commands)
     1. [deploy](#deploy)
@@ -911,6 +912,13 @@ query-tag: 'QUERY_TAG'
 
 # Allow out-of-order versioned script execution for parallel development (the default is False)
 out-of-order: false
+
+# Fail deploy when an already-applied versioned (V) script's checksum has drifted from the change history record (the default is False)
+# When disabled (default): logs a warning "Script checksum has drifted since application" and continues skipping the script.
+# When enabled: raises an error and stops deployment immediately.
+# This option ONLY affects versioned (V) scripts that have already been applied.
+# Repeatable (R) scripts are unaffected—checksum changes still trigger re-execution as before.
+strict-checksum-drift: false
 ```
 
 **Note:** If `config-version` is not specified, schemachange assumes version 1 for backward compatibility.
@@ -1033,6 +1041,7 @@ These environment variables configure schemachange-specific behavior:
 | `SCHEMACHANGE_AUTOCOMMIT` | Enable autocommit for DML commands | `true` or `false` | boolean |
 | `SCHEMACHANGE_DRY_RUN` | Run in dry run mode | `true` or `false` | boolean |
 | `SCHEMACHANGE_OUT_OF_ORDER` | Allow out-of-order versioned script execution | `true` or `false` | boolean |
+| `SCHEMACHANGE_STRICT_CHECKSUM_DRIFT` | Fail deploy when an already-applied versioned (V) script's checksum has drifted from the change history record. Does not affect repeatable (R) scripts. | `true` or `false` | boolean |
 | `SCHEMACHANGE_QUERY_TAG` | String to include in QUERY_TAG for SQL statements | `my-project` | string |
 | `SCHEMACHANGE_LOG_LEVEL` | Logging level | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` | string |
 | `SCHEMACHANGE_CONNECTIONS_FILE_PATH` | Path to connections.toml file (controls where schemachange looks for connection config) | `~/.snowflake/connections.toml` | string |
@@ -1331,6 +1340,62 @@ out-of-order: true
 | `--raise-exception-on-ignored-versioned-script` | Irrelevant—scripts are applied instead of ignored |
 | `--dry-run` | Shows which out-of-order scripts would be applied |
 
+### Strict Checksum Drift
+
+Versioned (V) scripts are intended to be immutable once applied. schemachange records each script's checksum in the change history table at deploy time, and compares it against the current file content on subsequent runs. By default, if a mismatch is detected (called "checksum drift"), schemachange logs `Script checksum has drifted since application` and continues to skip the script—which can mask accidental edits to already-applied migrations.
+
+#### When to Enable Strict Mode
+
+Enable the strict checksum drift option in environments where you want to **fail fast** on any drift rather than silently continuing. This is especially useful for:
+
+- **Production deployments** — catch accidental or unauthorized modifications to applied migrations before they cause schema inconsistency
+- **CI/CD pipelines** — enforce that versioned scripts are treated as immutable; if someone edits a V script after merging, the pipeline fails and surfaces the issue immediately
+- **Audit/compliance scenarios** — guarantee that what is deployed matches what is recorded in the change history, every time
+
+**Default behavior (disabled):** Log a warning and continue skipping the drifted V script. Repeatable (R) scripts are completely unaffected by this setting—checksum changes on R scripts still trigger re-execution as they normally do.
+
+#### Configuration
+
+This option follows the standard configuration precedence: **CLI > ENV > YAML**.
+
+**CLI:**
+```bash
+# Short (recommended) form
+schemachange deploy --strict-checksum-drift
+
+# Explicit prefixed form
+schemachange deploy --schemachange-strict-checksum-drift
+```
+
+**Environment variable:**
+```bash
+export SCHEMACHANGE_STRICT_CHECKSUM_DRIFT=true
+```
+Boolean values accept `true`/`false`, `yes`/`no`, `1`/`0` (case-insensitive).
+
+**YAML config (v2):**
+```yaml
+schemachange:
+  strict-checksum-drift: true
+```
+
+**YAML config (v1, legacy):**
+```yaml
+strict-checksum-drift: true
+```
+
+#### Behavior Matrix
+
+| Scenario | Default (`strict-checksum-drift: false`) | Strict mode (`strict-checksum-drift: true`) |
+|----------|-------------------------------------------|---------------------------------------------|
+| Versioned (V) script — already applied, checksum matches | ⏭️ Skip, no warning | ⏭️ Skip, no warning |
+| Versioned (V) script — already applied, **checksum drifted** | ⚠️ Log warning, then skip (continue deploy) | ❌ Raise `ValueError`, **abort deploy** |
+| Versioned (V) script — never applied | ✅ Apply normally | ✅ Apply normally |
+| Repeatable (R) script — checksum changed | ✅ Re-execute (unchanged behavior) | ✅ Re-execute (unchanged behavior) |
+| Repeatable (R) script — checksum matches | ⏭️ Skip (unchanged behavior) | ⏭️ Skip (unchanged behavior) |
+
+> **Scope clarification:** This setting acts **only on already-applied versioned (V) scripts**. It has no effect on repeatable (R) scripts, never-applied V scripts, or the overall script ordering logic.
+
 ## Upgrading to 4.1.0
 
 ### New Authentication CLI Arguments (with Security Design Decision)
@@ -1438,6 +1503,7 @@ Most arguments also support short forms (single dash, single letter) for conveni
 | `-ac`<br/>`--schemachange-autocommit`<br/>`--autocommit` *(deprecated)* | `SCHEMACHANGE_AUTOCOMMIT` | Enable autocommit for DML commands (default: false) |
 | `--schemachange-dry-run`<br/>`--dry-run` *(deprecated)* | `SCHEMACHANGE_DRY_RUN` | Run in dry run mode (default: false) |
 | `--out-of-order` | `SCHEMACHANGE_OUT_OF_ORDER` | Allow out-of-order versioned script execution for parallel development (default: false) |
+| `--schemachange-strict-checksum-drift`<br/>`--strict-checksum-drift` | `SCHEMACHANGE_STRICT_CHECKSUM_DRIFT` | Fail deploy when an already-applied versioned (V) script's checksum has drifted from the change history record. By default, drift only logs a warning and continues. Does not affect repeatable (R) scripts (default: false) |
 | `-Q`<br/>`--schemachange-query-tag`<br/>`--query-tag` *(deprecated)* | `SCHEMACHANGE_QUERY_TAG` | String to include in `QUERY_TAG` attached to every SQL statement |
 | `-L`<br/>`--schemachange-log-level`<br/>`--log-level` *(deprecated)* | `SCHEMACHANGE_LOG_LEVEL` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (default: `INFO`) |
 | `-C`<br/>`--schemachange-connection-name`<br/>`--connection-name` *(deprecated)* | `SCHEMACHANGE_CONNECTION_NAME` | Connection profile name from `connections.toml` |
