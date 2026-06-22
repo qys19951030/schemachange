@@ -385,6 +385,22 @@ def parse_cli_args(args) -> dict:
         "Can also be set via SCHEMACHANGE_OUT_OF_ORDER environment variable.",
         required=False,
     )
+    parser_deploy.add_argument(
+        "--schemachange-strict-checksum-drift",
+        "--strict-checksum-drift",
+        action="store_const",
+        const=True,
+        default=None,
+        dest="strict_checksum_drift",
+        help="Fail deploy when an already-applied versioned (V) script's checksum has drifted "
+        "from what is recorded in the change history table. "
+        "By default, checksum drift only logs a warning and continues. "
+        "This does not affect repeatable (R) scripts, where checksum changes trigger re-execution. "
+        "(the default is False). "
+        "Can also be set via SCHEMACHANGE_STRICT_CHECKSUM_DRIFT environment variable "
+        "or strict-checksum-drift in YAML config.",
+        required=False,
+    )
 
     parser_render = subcommands.add_parser(
         "render",

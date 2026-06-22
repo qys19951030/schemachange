@@ -45,6 +45,7 @@ class DeployConfig(BaseConfig):
     version_number_validation_regex: str | None = None
     raise_exception_on_ignored_versioned_script: bool = False
     out_of_order: bool = False  # Allow applying migrations with versions older than max_published_version
+    strict_checksum_drift: bool = False  # Fail deploy when already-applied V scripts have checksum drift
     session_parameters: dict | None = None  # Session parameters from CLI/ENV/YAML (merged with connections.toml)
     additional_snowflake_params: dict | None = None  # Parameters from YAML v2 or generic SNOWFLAKE_* env vars
 

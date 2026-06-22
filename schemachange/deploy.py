@@ -85,6 +85,12 @@ def deploy(config: DeployConfig, session: SnowflakeSession):
                 )
                 if script_metadata["checksum"] != checksum_current:
                     script_log.info("Script checksum has drifted since application")
+                    if config.strict_checksum_drift:
+                        raise ValueError(
+                            f"Versioned script checksum has drifted since application: {script.name}\n"
+                            f"Expected (from change history): {script_metadata['checksum']}\n"
+                            f"Actual (current file): {checksum_current}"
+                        )
                 scripts_skipped += 1
                 continue
 

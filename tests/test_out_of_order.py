@@ -395,6 +395,245 @@ class TestOutOfOrderEnvVar:
         assert "out_of_order" not in env_config
 
 
+class TestStrictChecksumDriftConfig:
+    """Test strict_checksum_drift configuration option."""
+
+    @mock.patch("pathlib.Path.is_dir", return_value=True)
+    def test_strict_checksum_drift_defaults_to_false(self, _):
+        """Test that strict_checksum_drift defaults to False for backward compatibility."""
+        config = DeployConfig.factory(
+            config_file_path=Path("."),
+            **minimal_deploy_config_kwargs,
+        )
+        assert config.strict_checksum_drift is False
+
+    @mock.patch("pathlib.Path.is_dir", return_value=True)
+    def test_strict_checksum_drift_can_be_enabled(self, _):
+        """Test that strict_checksum_drift can be set to True."""
+        config = DeployConfig.factory(
+            config_file_path=Path("."),
+            strict_checksum_drift=True,
+            **minimal_deploy_config_kwargs,
+        )
+        assert config.strict_checksum_drift is True
+
+
+class TestStrictChecksumDriftDeployLogic:
+    """Test the deploy logic with strict_checksum_drift enabled/disabled."""
+
+    @pytest.fixture
+    def mock_session(self):
+        """Create a mock SnowflakeSession."""
+        session = mock.MagicMock()
+        session.account = "test_account"
+        session.role = "test_role"
+        session.warehouse = "test_warehouse"
+        session.database = "test_database"
+        session.schema = "test_schema"
+        session.change_history_table.fully_qualified = "METADATA.SCHEMACHANGE.CHANGE_HISTORY"
+        return session
+
+    @pytest.fixture
+    def mock_config_base(self):
+        """Create base config kwargs."""
+        return {
+            "config_file_path": Path("."),
+            "root_folder": Path("."),
+            "dry_run": False,
+            "create_change_history_table": False,
+            "raise_exception_on_ignored_versioned_script": False,
+            "out_of_order": False,
+            "config_vars": {},
+            "modules_folder": None,
+            **minimal_deploy_config_kwargs,
+        }
+
+    def _create_mock_script(self, name: str, version: str, content: str = "SELECT 1;"):
+        """Helper to create a mock versioned script."""
+        script = mock.MagicMock()
+        script.name = name
+        script.version = version
+        script.type = "V"
+        script.format = "SQL"
+        script.file_path = Path(f"/migrations/{name}")
+        return script, content
+
+    @mock.patch("pathlib.Path.is_dir", return_value=True)
+    @mock.patch("schemachange.deploy.get_all_scripts_recursively")
+    @mock.patch("schemachange.deploy.JinjaTemplateProcessor")
+    def test_default_continues_on_checksum_drift(
+        self, mock_jinja, mock_get_scripts, _, mock_session, mock_config_base
+    ):
+        """
+        Test that by default (strict_checksum_drift=False), deploy continues
+        when a versioned script's checksum has drifted from what's in change history.
+        """
+        script_name = "v1.0.0__initial.sql"
+        script_v100, original_content = self._create_mock_script(script_name, "1.0.0")
+        modified_content = "SELECT 2; -- modified"
+        mock_get_scripts.return_value = {script_name: script_v100}
+
+        mock_processor = mock.MagicMock()
+        mock_processor.render.return_value = modified_content
+        mock_processor.relpath.return_value = script_name
+        mock_processor.prepare_for_execution.return_value = modified_content
+        mock_jinja.return_value = mock_processor
+
+        original_checksum = hashlib.sha224(original_content.encode("utf-8")).hexdigest()
+        versioned_scripts = defaultdict(dict)
+        versioned_scripts[script_name] = {
+            "version": "1.0.0",
+            "script": script_name,
+            "checksum": original_checksum,
+        }
+        mock_session.get_script_metadata.return_value = (versioned_scripts, None, "1.0.0")
+
+        config = DeployConfig.factory(strict_checksum_drift=False, **mock_config_base)
+
+        deploy(config, mock_session)
+
+        mock_session.apply_change_script.assert_not_called()
+
+    @mock.patch("pathlib.Path.is_dir", return_value=True)
+    @mock.patch("schemachange.deploy.get_all_scripts_recursively")
+    @mock.patch("schemachange.deploy.JinjaTemplateProcessor")
+    def test_strict_mode_raises_on_checksum_drift(
+        self, mock_jinja, mock_get_scripts, _, mock_session, mock_config_base
+    ):
+        """
+        Test that with strict_checksum_drift=True, deploy raises a ValueError
+        when a versioned script's checksum has drifted from what's in change history.
+        """
+        script_name = "v1.0.0__initial.sql"
+        script_v100, original_content = self._create_mock_script(script_name, "1.0.0")
+        modified_content = "SELECT 2; -- modified"
+        mock_get_scripts.return_value = {script_name: script_v100}
+
+        mock_processor = mock.MagicMock()
+        mock_processor.render.return_value = modified_content
+        mock_processor.relpath.return_value = script_name
+        mock_jinja.return_value = mock_processor
+
+        original_checksum = hashlib.sha224(original_content.encode("utf-8")).hexdigest()
+        versioned_scripts = defaultdict(dict)
+        versioned_scripts[script_name] = {
+            "version": "1.0.0",
+            "script": script_name,
+            "checksum": original_checksum,
+        }
+        mock_session.get_script_metadata.return_value = (versioned_scripts, None, "1.0.0")
+
+        config = DeployConfig.factory(strict_checksum_drift=True, **mock_config_base)
+
+        with pytest.raises(ValueError) as exc_info:
+            deploy(config, mock_session)
+
+        assert "Versioned script checksum has drifted since application" in str(exc_info.value)
+        assert script_name in str(exc_info.value)
+        assert original_checksum in str(exc_info.value)
+
+        current_checksum = hashlib.sha224(modified_content.encode("utf-8")).hexdigest()
+        assert current_checksum in str(exc_info.value)
+
+    @mock.patch("pathlib.Path.is_dir", return_value=True)
+    @mock.patch("schemachange.deploy.get_all_scripts_recursively")
+    @mock.patch("schemachange.deploy.JinjaTemplateProcessor")
+    def test_strict_mode_no_drift_no_error(
+        self, mock_jinja, mock_get_scripts, _, mock_session, mock_config_base
+    ):
+        """
+        Test that with strict_checksum_drift=True, deploy does NOT raise
+        when the versioned script's checksum matches what's in change history.
+        """
+        script_name = "v1.0.0__initial.sql"
+        script_v100, content = self._create_mock_script(script_name, "1.0.0")
+        mock_get_scripts.return_value = {script_name: script_v100}
+
+        mock_processor = mock.MagicMock()
+        mock_processor.render.return_value = content
+        mock_processor.relpath.return_value = script_name
+        mock_jinja.return_value = mock_processor
+
+        checksum = hashlib.sha224(content.encode("utf-8")).hexdigest()
+        versioned_scripts = defaultdict(dict)
+        versioned_scripts[script_name] = {
+            "version": "1.0.0",
+            "script": script_name,
+            "checksum": checksum,
+        }
+        mock_session.get_script_metadata.return_value = (versioned_scripts, None, "1.0.0")
+
+        config = DeployConfig.factory(strict_checksum_drift=True, **mock_config_base)
+
+        deploy(config, mock_session)
+
+        mock_session.apply_change_script.assert_not_called()
+
+    @mock.patch("pathlib.Path.is_dir", return_value=True)
+    @mock.patch("schemachange.deploy.get_all_scripts_recursively")
+    @mock.patch("schemachange.deploy.JinjaTemplateProcessor")
+    def test_strict_mode_does_not_affect_repeatable_scripts(
+        self, mock_jinja, mock_get_scripts, _, mock_session, mock_config_base
+    ):
+        """
+        Test that strict_checksum_drift does NOT affect repeatable (R) scripts.
+        R scripts should still be re-executed when their checksum changes.
+        """
+        r_script_name = "r__my_view.sql"
+        r_script = mock.MagicMock()
+        r_script.name = r_script_name
+        r_script.type = "R"
+        r_script.format = "SQL"
+        r_script.file_path = Path(f"/migrations/{r_script_name}")
+
+        mock_get_scripts.return_value = {r_script_name: r_script}
+
+        current_content = "CREATE OR REPLACE VIEW my_view AS SELECT 2;"
+        mock_processor = mock.MagicMock()
+        mock_processor.render.return_value = current_content
+        mock_processor.relpath.return_value = r_script_name
+        mock_processor.prepare_for_execution.return_value = current_content
+        mock_jinja.return_value = mock_processor
+
+        last_checksum = hashlib.sha224("CREATE OR REPLACE VIEW my_view AS SELECT 1;".encode("utf-8")).hexdigest()
+        r_scripts_checksum = {r_script_name: (last_checksum, None)}
+        mock_session.get_script_metadata.return_value = ({}, r_scripts_checksum, None)
+
+        config = DeployConfig.factory(strict_checksum_drift=True, **mock_config_base)
+
+        deploy(config, mock_session)
+
+        mock_session.apply_change_script.assert_called_once()
+
+
+class TestStrictChecksumDriftEnvVar:
+    """Test environment variable for strict_checksum_drift."""
+
+    @mock.patch.dict("os.environ", {"SCHEMACHANGE_STRICT_CHECKSUM_DRIFT": "true"})
+    def test_strict_checksum_drift_env_var_true(self):
+        """Test that SCHEMACHANGE_STRICT_CHECKSUM_DRIFT=true is parsed correctly."""
+        from schemachange.config.utils import get_schemachange_config_from_env
+
+        env_config = get_schemachange_config_from_env()
+        assert env_config.get("strict_checksum_drift") is True
+
+    @mock.patch.dict("os.environ", {"SCHEMACHANGE_STRICT_CHECKSUM_DRIFT": "false"})
+    def test_strict_checksum_drift_env_var_false(self):
+        """Test that SCHEMACHANGE_STRICT_CHECKSUM_DRIFT=false is parsed correctly."""
+        from schemachange.config.utils import get_schemachange_config_from_env
+
+        env_config = get_schemachange_config_from_env()
+        assert env_config.get("strict_checksum_drift") is False
+
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_strict_checksum_drift_env_var_absent(self):
+        """Test that strict_checksum_drift is not present when env var is not set."""
+        from schemachange.config.utils import get_schemachange_config_from_env
+
+        env_config = get_schemachange_config_from_env()
+        assert "strict_checksum_drift" not in env_config
+
+
 class TestAlphanumKey:
     """Test get_alphanum_key function used for version comparison."""
 

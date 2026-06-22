@@ -450,3 +450,24 @@ def test_parse_args_mixing_old_and_new_forms():
     args = ["deploy", "--vars", '{"a":"1"}', "-V", '{"b":"2"}', "--schemachange-vars", '{"c":"3"}']
     parsed_args = parse_cli_args(args)
     assert parsed_args["config_vars"] == {"c": "3"}
+
+
+def test_parse_args_strict_checksum_drift_cli_argument():
+    """Test that --strict-checksum-drift CLI argument is parsed correctly."""
+    args = ["deploy", "--strict-checksum-drift"]
+    parsed_args = parse_cli_args(args)
+    assert parsed_args.get("strict_checksum_drift") is True
+
+
+def test_parse_args_strict_checksum_drift_prefixed_argument():
+    """Test that --schemachange-strict-checksum-drift CLI argument is parsed correctly."""
+    args = ["deploy", "--schemachange-strict-checksum-drift"]
+    parsed_args = parse_cli_args(args)
+    assert parsed_args.get("strict_checksum_drift") is True
+
+
+def test_parse_args_strict_checksum_drift_absent():
+    """Test that strict_checksum_drift is None when not provided via CLI."""
+    args = ["deploy"]
+    parsed_args = parse_cli_args(args)
+    assert parsed_args.get("strict_checksum_drift") is None

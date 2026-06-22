@@ -836,6 +836,9 @@ schemachange:
   # Allow out-of-order versioned script execution for parallel development (default: false)
   out-of-order: false
 
+  # Fail deploy when an already-applied versioned (V) script's checksum has drifted (default: false)
+  strict-checksum-drift: false
+
 snowflake:
   # Snowflake connection parameters (these can also come from connections.toml or environment variables)
   account: 'myaccount.us-east-1.aws'
